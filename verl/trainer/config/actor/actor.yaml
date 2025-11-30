@@ -93,6 +93,24 @@ kl_loss_coef: 0.001
 # Type of KL divergence loss. Options: "kl"(k1), "abs", "mse"(k2), "low_var_kl"(k3), "full"
 kl_loss_type: low_var_kl
 
+# Entropy-driven token masking / diagnostics
+entropy_topk_enable: false
+entropy_topk_ratio: 0.2
+entropy_other_weight: 0.0
+entropy_weight_apply_to_pg: true
+entropy_mask_mode: high
+entropy_diag_enable: false
+entropy_diag_ratio: 0.2
+entropy_diag_log_percentiles: false
+entropy_diag_log_mass_shares: false
+entropy_diag_log_kl_cdf: false
+entropy_diag_log_l2_cdf: false
+entropy_diag_log_adv_cdf: false
+entropy_diag_log_cdf_avg: false
+entropy_diag_cdf_steps: 21
+entropy_band_lower: 0.0
+entropy_band_upper: 1.0
+
 # Number of PPO epochs per batch
 ppo_epochs: 1
 

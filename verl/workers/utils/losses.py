@@ -116,7 +116,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     loss_mode = config.policy_loss.get("loss_mode", "vanilla")
 
     policy_loss_fn = get_policy_loss_fn(loss_mode)
-    pg_loss, pg_metrics = policy_loss_fn(
+    pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
         old_log_prob=old_log_prob,
         log_prob=log_prob,
         advantages=advantages,
@@ -126,8 +126,14 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         rollout_is_weights=rollout_is_weights,
     )
 
-    metrics.update(pg_metrics)
-    metrics["actor/pg_loss"] = pg_loss.detach().item()
+    metrics.update(
+        {
+            "actor/pg_loss": pg_loss.detach().item(),
+            "actor/pg_clipfrac": pg_clipfrac.detach().item(),
+            "actor/ppo_kl": ppo_kl.detach().item(),
+            "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+        }
+    )
     policy_loss = pg_loss
 
     # add entropy loss
