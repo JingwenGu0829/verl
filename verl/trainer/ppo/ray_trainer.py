@@ -19,6 +19,7 @@ This trainer supports model-agonistic model initialization with huggingface
 """
 
 import json
+import csv
 import os
 import uuid
 from collections import defaultdict
@@ -906,6 +907,64 @@ class RayPPOTrainer:
         else:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
+    def _maybe_log_local_metrics(self, step: int, metrics: dict, is_eval: bool) -> None:
+        """Append selected metrics to a lightweight CSV for quick local inspection."""
+        try:
+            base_dir = self.config.trainer.default_local_dir
+            os.makedirs(base_dir, exist_ok=True)
+            if not hasattr(self, "_metric_log_path"):
+                fname = f"{self.config.trainer.experiment_name}_metrics.csv"
+                self._metric_log_path = os.path.join(base_dir, fname)
+                if not os.path.exists(self._metric_log_path):
+                    with open(self._metric_log_path, "w", newline="") as f:
+                        writer = csv.DictWriter(
+                            f,
+                            fieldnames=[
+                                "step",
+                                "stage",
+                                "actor/step_kl_mean_global",
+                                "actor/grad_norm",
+                                "eval_reward",
+                            ],
+                        )
+                        writer.writeheader()
+
+            row = {"step": step, "stage": "eval" if is_eval else "train"}
+            if "actor/step_kl_mean_global" in metrics:
+                try:
+                    row["actor/step_kl_mean_global"] = float(metrics["actor/step_kl_mean_global"])
+                except Exception:
+                    pass
+            if "actor/grad_norm" in metrics:
+                try:
+                    row["actor/grad_norm"] = float(metrics["actor/grad_norm"])
+                except Exception:
+                    pass
+            if is_eval:
+                for k, v in metrics.items():
+                    if isinstance(k, str) and "val-core" in k and "reward/mean" in k:
+                        try:
+                            row["eval_reward"] = float(v)
+                        except Exception:
+                            pass
+                        break
+            if any(key in row for key in ("actor/step_kl_mean_global", "actor/grad_norm", "eval_reward")):
+                with open(self._metric_log_path, "a", newline="") as f:
+                    writer = csv.DictWriter(
+                        f,
+                        fieldnames=[
+                            "step",
+                            "stage",
+                            "actor/step_kl_mean_global",
+                            "actor/grad_norm",
+                            "eval_reward",
+                        ],
+                    )
+                    writer.writerow(row)
+        except Exception:
+            # never fail training on local logging issues
+            pass
+
     def _start_profiling(self, do_profile: bool) -> None:
         """Start profiling for all worker groups if profiling is enabled."""
         if do_profile:
@@ -997,6 +1056,7 @@ class RayPPOTrainer:
             assert val_metrics, f"{val_metrics=}"
             pprint(f"Initial validation metrics: {val_metrics}")
             logger.log(data=val_metrics, step=self.global_steps)
+            self._maybe_log_local_metrics(self.global_steps, val_metrics, is_eval=True)
             if self.config.trainer.get("val_only", False):
                 return
 
@@ -1309,6 +1369,7 @@ class RayPPOTrainer:
 
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
+                self._maybe_log_local_metrics(self.global_steps, metrics, is_eval=False)
 
                 progress_bar.update(1)
                 self.global_steps += 1

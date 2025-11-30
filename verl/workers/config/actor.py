@@ -114,6 +114,27 @@ class ActorConfig(BaseConfig):
     use_torch_compile: bool = True
     kl_loss_coef: float = 0.001
     kl_loss_type: str = "low_var_kl"
+
+    # Entropy-driven exploration controls
+    entropy_topk_enable: bool = False
+    entropy_topk_ratio: float = 0.2
+    entropy_other_weight: float = 0.0
+    entropy_weight_apply_to_pg: bool = True
+    entropy_mask_mode: str = "high"
+
+    # Entropy diagnostics (metrics-only)
+    entropy_diag_enable: bool = False
+    entropy_diag_ratio: float = 0.2
+    entropy_diag_log_percentiles: bool = False
+    entropy_diag_log_mass_shares: bool = False
+    entropy_diag_log_kl_cdf: bool = False
+    entropy_diag_log_l2_cdf: bool = False
+    entropy_diag_log_adv_cdf: bool = False
+    entropy_diag_log_cdf_avg: bool = False
+    entropy_diag_cdf_steps: int = 21
+    entropy_band_lower: float = 0.0
+    entropy_band_upper: float = 1.0
+
     ppo_epochs: int = 1
     shuffle: bool = False
     data_loader_seed: int = 1
