@@ -134,6 +134,8 @@ class ActorConfig(BaseConfig):
     entropy_diag_cdf_steps: int = 21
     entropy_band_lower: float = 0.0
     entropy_band_upper: float = 1.0
+    # Compute G_H using stepwise KL (double forward)
+    entropy_diag_stepwise_kl: bool = False
 
     ppo_epochs: int = 1
     shuffle: bool = False

@@ -111,6 +111,10 @@ entropy_diag_cdf_steps: 21
 entropy_band_lower: 0.0
 entropy_band_upper: 1.0
 
+# Whether to compute G_H using stepwise KL (double forward method)
+# This requires an extra forward pass after the actor update to measure policy change
+entropy_diag_stepwise_kl: false
+
 # Number of PPO epochs per batch
 ppo_epochs: 1
 

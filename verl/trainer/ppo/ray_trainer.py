@@ -22,6 +22,7 @@ import json
 import csv
 import os
 import uuid
+from pathlib import Path
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -155,6 +156,7 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
     # according to https://github.com/huggingface/trl/blob/951ca1841f29114b969b57b26c7d3e80a39f75a0/trl/trainer/ppo_trainer.py#L837
     kl_ctrl.update(current_kl=current_kl, n_steps=batch_size)
     data.batch["token_level_rewards"] = token_level_rewards
+    data.batch["kld"] = kld
 
     metrics = {"actor/reward_kl_penalty": current_kl, "actor/reward_kl_penalty_coeff": beta}
 
@@ -1201,6 +1203,8 @@ class RayPPOTrainer:
                             )
                             old_log_prob_metrics = {"actor/entropy": entropy_agg.detach().item()}
                             metrics.update(old_log_prob_metrics)
+                            # Keep token-level entropy for custom metrics
+                            batch.batch["token_entropy"] = entropys
                             old_log_prob.batch.pop("entropys")
                             batch = batch.union(old_log_prob)
                             if "rollout_log_probs" in batch.batch.keys():
@@ -1275,6 +1279,60 @@ class RayPPOTrainer:
                             config=self.config.algorithm,
                         )
 
+                    # Custom metrics: entropy-adv correlation and G_H
+                    # If stepwise KL is enabled, G_H will be computed after actor update
+                    stepwise_kl_enabled = getattr(self.config.actor_rollout_ref.actor, "entropy_diag_stepwise_kl", False)
+                    try:
+                        ent = batch.batch.get("token_entropy", None)
+                        adv = batch.batch.get("advantages", None)
+                        kld = batch.batch.get("kld", None)
+                        mask = batch.batch.get("response_mask", None)
+                        if ent is not None and adv is not None and mask is not None:
+                            mask_bool = mask.bool()
+                            ent_flat = ent[mask_bool]
+                            adv_flat = adv[mask_bool]
+                            n = ent_flat.numel()
+                            if n > 1:
+                                # Correlation (always computed)
+                                ent_c = ent_flat - ent_flat.mean()
+                                adv_c = adv_flat - adv_flat.mean()
+                                denom = torch.linalg.norm(ent_c) * torch.linalg.norm(adv_c)
+                                corr = (
+                                    (ent_c * adv_c).sum() / denom if denom > 0 else torch.tensor(0.0, device=ent.device)
+                                )
+                                metrics["custom/entropy_adv_corr"] = corr.detach().item()
+
+                                # G_H using ref-based KL (only if stepwise KL is NOT enabled)
+                                if not stepwise_kl_enabled and kld is not None:
+                                    kld_flat = kld[mask_bool]
+                                    if kld_flat.numel() > 0:
+                                        # Percentile q_t
+                                        sorted_idx = torch.argsort(ent_flat)
+                                        ranks = torch.empty_like(sorted_idx, dtype=torch.float)
+                                        ranks[sorted_idx] = torch.arange(n, device=ent.device, dtype=torch.float)
+                                        q = ranks / (n - 1 if n > 1 else 1.0)
+
+                                        # G_H with ref KL
+                                        kld_abs = kld_flat.abs()
+                                        kl_sum = kld_abs.sum()
+                                        g_h = (q * kld_abs).sum() / kl_sum if kl_sum.abs() > 0 else torch.tensor(0.0, device=ent.device)
+                                        metrics["custom/G_H"] = g_h.detach().item()
+
+                                        # Local CSV logging
+                                        local_dir = Path(self.config.trainer.default_local_dir)
+                                        local_dir.mkdir(parents=True, exist_ok=True)
+                                        csv_path = local_dir / "step_metrics.csv"
+                                        write_header = not csv_path.exists()
+                                        with csv_path.open("a", newline="") as f:
+                                            writer = csv.writer(f)
+                                            if write_header:
+                                                writer.writerow(["step", "entropy_adv_corr", "G_H"])
+                                            writer.writerow(
+                                                [self.global_steps, corr.detach().item(), g_h.detach().item()]
+                                            )
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[warn] custom metric computation failed: {exc}")
+
                     # update critic
                     if self.use_critic:
                         with marked_timer("update_critic", timing_raw, color="pink"):
@@ -1293,6 +1351,62 @@ class RayPPOTrainer:
                             actor_output = self.actor_rollout_wg.update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
+
+                        # Stepwise KL G_H: compute G_H using stepwise KL (double forward method)
+                        # This measures how much the policy changed during this update step
+                        if stepwise_kl_enabled:
+                            try:
+                                with marked_timer("stepwise_kl_g_h", timing_raw, color="magenta"):
+                                    # Get stored entropy and old_log_probs from before the update
+                                    ent = batch.batch.get("token_entropy", None)
+                                    old_log_probs = batch.batch.get("old_log_probs", None)
+                                    mask = batch.batch.get("response_mask", None)
+
+                                    if ent is not None and old_log_probs is not None and mask is not None:
+                                        # Forward pass to get new log probs after the update
+                                        new_log_prob_result = self.actor_rollout_wg.compute_log_prob(batch)
+                                        new_log_probs = new_log_prob_result.batch["old_log_probs"]  # same key name
+
+                                        mask_bool = mask.bool()
+                                        ent_flat = ent[mask_bool]
+                                        old_lp_flat = old_log_probs[mask_bool]
+                                        new_lp_flat = new_log_probs[mask_bool]
+
+                                        n = ent_flat.numel()
+                                        if n > 1:
+                                            # Stepwise KL: 0.5 * (new_log_prob - old_log_prob)^2
+                                            delta = (new_lp_flat - old_lp_flat).detach().float()
+                                            step_kl = 0.5 * delta * delta
+
+                                            # Percentile q_t for entropy
+                                            sorted_idx = torch.argsort(ent_flat)
+                                            ranks = torch.empty_like(sorted_idx, dtype=torch.float)
+                                            ranks[sorted_idx] = torch.arange(n, device=ent.device, dtype=torch.float)
+                                            q = ranks / (n - 1 if n > 1 else 1.0)
+
+                                            # G_H = sum(q_t * KL_t) / sum(KL_t)
+                                            kl_sum = step_kl.sum()
+                                            g_h = (q * step_kl).sum() / kl_sum if kl_sum.abs() > 1e-12 else torch.tensor(0.5, device=ent.device)
+
+                                            metrics["custom/G_H"] = g_h.detach().item()
+
+                                            # Local CSV logging
+                                            local_dir = Path(self.config.trainer.default_local_dir)
+                                            local_dir.mkdir(parents=True, exist_ok=True)
+                                            csv_path = local_dir / "step_metrics.csv"
+                                            write_header = not csv_path.exists()
+                                            corr_val = metrics.get("custom/entropy_adv_corr", 0.0)
+                                            with csv_path.open("a", newline="") as f:
+                                                writer = csv.writer(f)
+                                                if write_header:
+                                                    writer.writerow(["step", "entropy_adv_corr", "G_H"])
+                                                writer.writerow([
+                                                    self.global_steps,
+                                                    corr_val,
+                                                    g_h.detach().item()
+                                                ])
+                            except Exception as exc:  # noqa: BLE001
+                                print(f"[warn] stepwise KL G_H computation failed: {exc}")
 
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)

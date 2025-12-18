@@ -45,6 +45,9 @@ lora_rank: 0
 # LoRA scaling factor
 lora_alpha: 16
 
+# Optional LoRA init strategy (e.g., pissa)
+init_lora_weights: null
+
 # Target modules for LoRA adaptation
 target_modules: all-linear
 

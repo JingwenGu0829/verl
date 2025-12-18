@@ -81,6 +81,9 @@ class HFModelConfig(BaseConfig):
 
     exclude_modules: Optional[str] = None
 
+    # Optional LoRA init strategy (e.g., "pissa")
+    init_lora_weights: Optional[Any] = None
+
     # path to pre-trained LoRA adapter to load for continued training
     lora_adapter_path: Optional[str] = None
     use_liger: bool = False
